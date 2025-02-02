@@ -1,4 +1,3 @@
-
 import AnimatedCounter from './AnimatedCounter';
 import DoughnutChart from './DoughnutChart';
 
@@ -21,8 +20,6 @@ const TotalBalanceBox = ({
           </p>
 
           <div className="total-balance-amount flex-center gap-2">
-
-
             <AnimatedCounter amount={totalCurrentBalance} />
           </div>
         </div>
