@@ -8,13 +8,30 @@ import {
   TransferNetwork,
   TransferType,
 } from "plaid";
+import axios from "axios";
 
-import { plaidClient } from "../plaid";
 import { parseStringify } from "../utils";
-
 import { getTransactionsByBankId } from "./transaction.actions";
 import { getBanks, getBank } from "./user.actions";
 
+// Setup Axios for Plaid requests using your environment variables.
+const PLAID_BASE_URL =
+  process.env.PLAID_BASE_URL || "https://sandbox.plaid.com";
+const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID;
+const PLAID_SECRET = process.env.PLAID_SECRET;
+
+const axiosInstance = axios.create({
+  baseURL: PLAID_BASE_URL,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+/**
+ * getAccounts:
+ * Fetches the banks for a user, then calls Plaid's accounts/get endpoint for each bank
+ * to get account details along with institution info.
+ */
 export const getAccounts = async ({ userId }: getAccountsProps) => {
   try {
     console.log("Fetching banks for user:", userId);
@@ -27,10 +44,17 @@ export const getAccounts = async ({ userId }: getAccountsProps) => {
 
     const accounts = await Promise.all(
       banks.map(async (bank: Bank) => {
-        const accountsResponse = await plaidClient.accountsGet({
+        // Call Plaid's accounts/get endpoint using Axios.
+        const accountsResponse = await axiosInstance.post("/accounts/get", {
           access_token: bank.accessToken,
+          client_id: PLAID_CLIENT_ID,
+          secret: PLAID_SECRET,
         });
-        if (!accountsResponse || !accountsResponse.data.accounts?.length) {
+        if (
+          !accountsResponse ||
+          !accountsResponse.data.accounts ||
+          accountsResponse.data.accounts.length === 0
+        ) {
           console.error(
             "Error: No account data from Plaid for bank:",
             bank.$id
@@ -38,9 +62,12 @@ export const getAccounts = async ({ userId }: getAccountsProps) => {
           return null;
         }
         const accountData = accountsResponse.data.accounts[0];
+
+        // Get institution info using our helper below.
         const institution = await getInstitution({
           institutionId: accountsResponse.data.item.institution_id!,
         });
+
         return {
           id: accountData.account_id,
           availableBalance: accountData.balances.available!,
@@ -70,6 +97,11 @@ export const getAccounts = async ({ userId }: getAccountsProps) => {
   }
 };
 
+/**
+ * getAccount:
+ * Fetches a single bank (via its document ID) then uses Plaid to retrieve the account,
+ * merges any transfer transactions, gets institution details, and combines all transactions.
+ */
 export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
   try {
     console.log("Fetching bank with documentId:", appwriteItemId);
@@ -81,11 +113,17 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     }
 
     console.log("Fetching account info from Plaid...");
-    const accountsResponse = await plaidClient.accountsGet({
+    const accountsResponse = await axiosInstance.post("/accounts/get", {
       access_token: bank.accessToken,
+      client_id: PLAID_CLIENT_ID,
+      secret: PLAID_SECRET,
     });
 
-    if (!accountsResponse || !accountsResponse.data.accounts?.length) {
+    if (
+      !accountsResponse ||
+      !accountsResponse.data.accounts ||
+      accountsResponse.data.accounts.length === 0
+    ) {
       console.error("Error: No account data found from Plaid.");
       return null;
     }
@@ -143,15 +181,24 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
   }
 };
 
+/**
+ * getInstitution:
+ * Fetches institution details from Plaid using the institutions/get_by_id endpoint.
+ */
 export const getInstitution = async ({
   institutionId,
 }: getInstitutionProps) => {
   try {
     console.log("Fetching institution with ID:", institutionId);
-    const institutionResponse = await plaidClient.institutionsGetById({
-      institution_id: institutionId,
-      country_codes: ["US"] as CountryCode[],
-    });
+    const institutionResponse = await axiosInstance.post(
+      "/institutions/get_by_id",
+      {
+        institution_id: institutionId,
+        country_codes: ["US"] as CountryCode[],
+        client_id: PLAID_CLIENT_ID,
+        secret: PLAID_SECRET,
+      }
+    );
     return parseStringify(institutionResponse.data.institution);
   } catch (error) {
     console.error("An error occurred while getting the institution:", error);
@@ -159,21 +206,33 @@ export const getInstitution = async ({
   }
 };
 
+/**
+ * getTransactions:
+ * Uses Plaid's transactions/sync endpoint (via Axios) to fetch transactions.
+ * A cursor is used to continue fetching transactions in batches if more are available.
+ */
 export const getTransactions = async ({
   accessToken,
 }: getTransactionsProps) => {
   let hasMore = true;
   let transactions: any[] = [];
+  let cursor = ""; // Initial cursor (empty for the first call)
 
   try {
     console.log("Fetching transactions...");
     while (hasMore) {
-      const response = await plaidClient.transactionsSync({
+      const response = await axiosInstance.post("/transactions/sync", {
         access_token: accessToken,
+        cursor, // Send the current cursor (empty string initially)
+        client_id: PLAID_CLIENT_ID,
+        secret: PLAID_SECRET,
       });
+
+      console.log("Plaid transactionsSync response:", response.data);
+
       if (!response?.data?.added || response.data.added.length === 0) break;
       transactions.push(
-        ...response.data.added.map((transaction) => ({
+        ...response.data.added.map((transaction: any) => ({
           id: transaction.transaction_id,
           name: transaction.name,
           paymentChannel: transaction.payment_channel,
@@ -186,6 +245,8 @@ export const getTransactions = async ({
           image: transaction.logo_url,
         }))
       );
+      // Update the cursor and hasMore flag for the next iteration.
+      cursor = response.data.next_cursor || "";
       hasMore = response.data.has_more;
     }
     return parseStringify(transactions);
